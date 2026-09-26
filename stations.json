@@ -1,0 +1,14 @@
+[
+  {"id":"depa","name":"Depa Radio","city":"Mexico City","tz":"America/Mexico_City","type":"Bar","venue":"the DJ booth at Departamento, a bar in Roma","url":"https://servidor15-2.brlogic.com:7006/live","site":"https://www.depa.radio/"},
+  {"id":"ida","name":"IDA","city":"Tallinn","tz":"Europe/Tallinn","type":"Bar and studio","venue":"a non-profit bar and studio split between Tallinn and Helsinki, open Thursday to Saturday nights","url":"https://broadcast.idaidaida.net:8000/stream","site":"https://www.idaidaida.net/"},
+  {"id":"kiosk","name":"Kiosk Radio","city":"Brussels","tz":"Europe/Brussels","type":"Park kiosk","venue":"a wooden kiosk in a Brussels park","url":"https://kioskradiobxl.out.airtime.pro/kioskradiobxl_b","site":"https://kioskradio.com/"},
+  {"id":"aaja","name":"Aaja Music","city":"London","tz":"Europe/London","type":"Bar","venue":"a bar in a railway arch in Deptford","url":"https://aaja.radiocult.fm/stream","site":"https://aajamusic.com/"},
+  {"id":"mellotron","name":"Le Mellotron","city":"Paris","tz":"Europe/Paris","type":"Bar","venue":"a Paris bar playing soul, funk, jazz and Brazilian records","url":"https://listen.radioking.com/radio/477719/stream/534044","site":"https://lemellotron.com"},
+  {"id":"norrm","name":"Norrm","city":"Bandung","tz":"Asia/Jakarta","type":"Bar","venue":"a studio above their bar in Bandung","url":"https://listen.norrm.com/default","site":"https://www.norrm.com/"},
+  {"id":"pinata","name":"Piñata Radio","city":"Montpellier","tz":"Europe/Paris","type":"Bar","venue":"a bar in Montpellier hosting local and visiting selectors","url":"https://listen.radioking.com/radio/96031/stream/134656","site":"https://www.pinataradio.com/"},
+  {"id":"buenavida","name":"Radio Buena Vida","city":"Glasgow","tz":"Europe/London","type":"Café-bar","venue":"a café-bar in Govanhill","url":"https://s4.radio.co/s69b281ac0/listen","site":"https://buenavida.co.uk/"},
+  {"id":"mad","name":"Mad Radio","city":"Bogotá","tz":"America/Bogota","type":"Vinyl bar","venue":"a vinyl bar in Bogotá","url":"https://c25.radioboss.fm/stream/171","site":"https://madradio.co/"},
+  {"id":"boogaloo","name":"Boogaloo Radio","city":"London","tz":"Europe/London","type":"Pub","venue":"The Boogaloo, a pub in Highgate","url":"https://streams.radio.co/sb88c742f0/listen","site":"https://www.boogalooradio.com/"},
+  {"id":"bcr","name":"Bangkok Community Radio","city":"Bangkok","tz":"Asia/Bangkok","type":"Record shop","venue":"a studio above a Bangkok record shop","url":"https://bcr.radiocult.fm/stream","site":"https://www.bangkokcommunityradio.com/"},
+  {"id":"greatcircles","name":"Great Circles","city":"Philadelphia","tz":"America/New_York","type":"Record shop","venue":"a record shop studio on Frankford Avenue","url":"https://audio-edge-ey5nr.ams.s.radiomast.io/799da8fd-389e-4923-9068-77c725c6e82f","site":"https://greatcircles.net/"}
+]

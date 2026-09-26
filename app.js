@@ -1,0 +1,387 @@
+/* ============================================================
+   Nightcap app  —  everything the site DOES
+   ------------------------------------------------------------
+   Sections in order:
+     CONFIG            site name, broadcast hours, timings  <- start here
+     fallback stations used when stations.json can't be read
+     time helpers      works out local time and "is it night there"
+     audio graph       the room dial: reverb, crowd murmur, glasses
+     streaming         connecting to a station, errors, fallbacks
+     player UI         the Now playing window
+     bars list         the Bars window
+     night shift       the 24-hour chart
+     VU meters         the two needles
+     windows           dragging, closing, layout
+     tip the bar       the tip window (a demo: no money moves)
+     boot              starts everything
+   ============================================================ */
+
+/* ---------- CONFIG: the things you're most likely to change ---------- */
+const CONFIG = {
+  siteName: 'Nightcap',          // shown in the menu bar, boot screen and browser tab
+  tagline: "Real streams from bars, pubs, cafés and record shops around the world.",
+  nightStart: 18,                // a bar counts as "night there" from this hour (24h clock)
+  nightEnd: 2,                   //   until this hour, local time in that city
+  statusRefreshMinutes: 2,       // how often the site re-reads status.json
+  defaultRoomDial: 25            // starting position of the room dial, 0-100
+};
+
+
+/* Stream URLs from the public list at github.com/deroverda/recommended-radio-streams */
+let STATIONS = [
+ {name:'Depa Radio', city:'Mexico City', tz:'America/Mexico_City', type:'Bar', venue:'the DJ booth at Departamento, a bar in Roma', url:'https://servidor15-2.brlogic.com:7006/live', site:'https://www.depa.radio/'},
+ {name:'IDA', city:'Tallinn', tz:'Europe/Tallinn', type:'Bar and studio', venue:'a non-profit bar and studio split between Tallinn and Helsinki, open Thursday to Saturday nights', url:'https://broadcast.idaidaida.net:8000/stream', site:'https://www.idaidaida.net/'},
+ {name:'Kiosk Radio', city:'Brussels', tz:'Europe/Brussels', type:'Park kiosk', venue:'a wooden kiosk in a Brussels park', url:'https://kioskradiobxl.out.airtime.pro/kioskradiobxl_b', site:'https://kioskradio.com/'},
+ {name:'Aaja Music', city:'London', tz:'Europe/London', type:'Bar', venue:'a bar in a railway arch in Deptford', url:'https://aaja.radiocult.fm/stream', site:'https://aajamusic.com/'},
+ {name:'Le Mellotron', city:'Paris', tz:'Europe/Paris', type:'Bar', venue:'a Paris bar playing soul, funk, jazz and Brazilian records', url:'https://listen.radioking.com/radio/477719/stream/534044', site:'https://lemellotron.com'},
+ {name:'Norrm', city:'Bandung', tz:'Asia/Jakarta', type:'Bar', venue:'a studio above their bar in Bandung', url:'https://listen.norrm.com/default', site:'https://www.norrm.com/'},
+ {name:'Piñata Radio', city:'Montpellier', tz:'Europe/Paris', type:'Bar', venue:'a bar in Montpellier hosting local and visiting selectors', url:'https://listen.radioking.com/radio/96031/stream/134656', site:'https://www.pinataradio.com/'},
+ {name:'Radio Buena Vida', city:'Glasgow', tz:'Europe/London', type:'Café-bar', venue:'a café-bar in Govanhill', url:'https://s4.radio.co/s69b281ac0/listen', site:'https://buenavida.co.uk/'},
+ {name:'Mad Radio', city:'Bogotá', tz:'America/Bogota', type:'Vinyl bar', venue:'a vinyl bar in Bogotá', url:'https://c25.radioboss.fm/stream/171', site:'https://madradio.co/'},
+ {name:'Boogaloo Radio', city:'London', tz:'Europe/London', type:'Pub', venue:'The Boogaloo, a pub in Highgate', url:'https://streams.radio.co/sb88c742f0/listen', site:'https://www.boogalooradio.com/'},
+ {name:'Bangkok Community Radio', city:'Bangkok', tz:'Asia/Bangkok', type:'Record shop', venue:'a studio above a Bangkok record shop', url:'https://bcr.radiocult.fm/stream', site:'https://www.bangkokcommunityradio.com/'},
+ {name:'Great Circles', city:'Philadelphia', tz:'America/New_York', type:'Record shop', venue:'a record shop studio on Frankford Avenue', url:'https://audio-edge-ey5nr.ams.s.radiomast.io/799da8fd-389e-4923-9068-77c725c6e82f', site:'https://greatcircles.net/'}
+];
+const ROOMFEEL = {'Bar':[.5,.7],'Bar and studio':[.5,.6],'Park kiosk':[.25,.5],'Café-bar':[.45,.65],'Vinyl bar':[.5,.7],'Pub':[.55,.9],'Record shop':[.4,.35]};
+const slug=t=>t.toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g,'');
+function prep(){ STATIONS.forEach(s=>{ if(!s.id) s.id=slug(s.name); const f=ROOMFEEL[s.type]||[.5,.6]; s.size=f[0]; s.crowd=f[1]; }); }
+prep();
+
+/* ---------- live status (written by scripts/check-streams.mjs) ---------- */
+let STATUS={}, CHECKED_AT=null;
+const health=s=>STATUS[s.id];                       // undefined = unknown (e.g. opened as a local file)
+const isDown=s=>{ const h=health(s); return !!h && !h.ok; };
+const streamUrl=s=>(health(s)&&health(s).playUrl)||s.url;
+async function loadStations(){
+  try{ const r=await fetch('stations.json',{cache:'no-store'}); if(r.ok){ const list=await r.json(); if(Array.isArray(list)&&list.length){ STATIONS=list; prep(); } } }catch(e){}
+}
+async function loadStatus(){
+  try{ const r=await fetch('status.json?t='+Date.now(),{cache:'no-store'}); if(!r.ok) return;
+    const d=await r.json(); STATUS=d.stations||{}; CHECKED_AT=d.checkedAt?new Date(d.checkedAt):null;
+  }catch(e){}
+}
+function agoText(d){ const m=Math.round((Date.now()-d.getTime())/60000); return m<1?'just now':m===1?'1 minute ago':m<60?`${m} minutes ago`:`${Math.round(m/60)} hours ago`; }
+
+/* ---------- time ---------- */
+function localHM(tz,d=new Date()){
+  const p=new Intl.DateTimeFormat('en-GB',{timeZone:tz,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d);
+  return {h:+p.find(x=>x.type==='hour').value, m:+p.find(x=>x.type==='minute').value};
+}
+const fmt=(h,m)=>String(h).padStart(2,'0')+':'+String(m).padStart(2,'0');
+function status(s){ const {h,m}=localHM(s.tz); const a=CONFIG.nightStart,b=CONFIG.nightEnd;
+  return {night: a<b ? (h>=a&&h<b) : (h>=a||h<b), h, m}; }
+function utcOffsetMin(tz){ const d=new Date(), l=localHM(tz,d); let diff=(l.h*60+l.m)-(d.getUTCHours()*60+d.getUTCMinutes()); if(diff<=-720)diff+=1440; if(diff>840)diff-=1440; return diff; }
+
+/* ---------- state ---------- */
+let current=null, playing=false, connecting=false, filter='all';
+let ctx, master, bus, dryLP, conv, wet, amb, murmur, anL, anR, noiseBuf;
+let audioEl=null, srcNode=null, routed=false, connectTimer=null, token=0;
+const $=id=>document.getElementById(id);
+const volume=()=>$('vol').value/100;
+const roomAmt=()=>$('roomDial').value/100;
+
+/* ---------- audio graph (room dial + meters) ---------- */
+function panner(v){ if(ctx.createStereoPanner){const p=ctx.createStereoPanner(); p.pan.value=v; return p;} return ctx.createGain(); }
+function initAudio(){
+  if(ctx) return;
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  master=ctx.createGain(); master.gain.value=0;
+  bus=ctx.createGain();
+  const comp=ctx.createDynamicsCompressor(); comp.threshold.value=-8; comp.ratio.value=3;
+  dryLP=ctx.createBiquadFilter(); dryLP.type='lowpass'; dryLP.frequency.value=20000;
+  conv=ctx.createConvolver(); wet=ctx.createGain(); wet.gain.value=0;
+  bus.connect(dryLP); dryLP.connect(comp); bus.connect(conv); conv.connect(wet); wet.connect(comp);
+  comp.connect(master); master.connect(ctx.destination);
+  const split=ctx.createChannelSplitter(2); master.connect(split);
+  anL=ctx.createAnalyser(); anR=ctx.createAnalyser(); anL.fftSize=anR.fftSize=1024; split.connect(anL,0); split.connect(anR,1);
+  noiseBuf=ctx.createBuffer(1,ctx.sampleRate*2,ctx.sampleRate); const nd=noiseBuf.getChannelData(0); for(let i=0;i<nd.length;i++) nd[i]=Math.random()*2-1;
+  amb=ctx.createGain(); amb.gain.value=0; murmur=ctx.createGain(); murmur.gain.value=.5;
+  [[420,.9,-.4],[950,1.2,.4]].forEach(([f,q,pn])=>{ const n=ctx.createBufferSource(); n.buffer=noiseBuf; n.loop=true;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=f; bp.Q.value=q; const p=panner(pn);
+    n.connect(bp); bp.connect(p); p.connect(murmur); n.start(0,Math.random()*1.5); });
+  murmur.connect(amb); murmur.connect(conv); amb.connect(comp);
+  setInterval(()=>murmur.gain.setTargetAtTime(.25+Math.random()*.6,ctx.currentTime,.6),700);
+  setInterval(()=>{ if(playing&&routed&&roomAmt()>.05&&Math.random()<.35*roomAmt()*current.crowd) clink(); },900);
+}
+function makeIR(size){
+  const len=Math.floor(ctx.sampleRate*(.4+size*2.2)), ir=ctx.createBuffer(2,len,ctx.sampleRate);
+  for(let c=0;c<2;c++){ const d=ir.getChannelData(c); for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.4+(1-size)*2); }
+  return ir;
+}
+function applyRoom(){
+  if(!ctx||!current) return;
+  const r=routed?roomAmt():0, t=ctx.currentTime;
+  if(conv._for!==current.name){ conv.buffer=makeIR(current.size); conv._for=current.name; }
+  wet.gain.setTargetAtTime(r*(.3+current.size*.4),t,.15);
+  amb.gain.setTargetAtTime(r*.08*current.crowd,t,.15);
+  dryLP.frequency.setTargetAtTime(20000-r*13000,t,.15);
+}
+function clink(){
+  const t=ctx.currentTime+.01, f=2600+Math.random()*1800, v=.03*roomAmt(), p=panner(Math.random()*1.6-.8);
+  [1,2.76,5.4].forEach((m,i)=>{ const o=ctx.createOscillator(); o.frequency.value=f*m; const g=ctx.createGain();
+    g.gain.setValueAtTime(v/(i+1),t); g.gain.exponentialRampToValueAtTime(.0001,t+.35/(i+1)); o.connect(g); g.connect(p); o.start(t); o.stop(t+.4); });
+  p.connect(dryLP); p.connect(conv);
+}
+function tuneStatic(){
+  if(!ctx) return;
+  const n=ctx.createBufferSource(); n.buffer=noiseBuf; const f=ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=1800;
+  const g=ctx.createGain(), t=ctx.currentTime; g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.1*volume(),t+.05); g.gain.linearRampToValueAtTime(0,t+.4);
+  n.connect(f); f.connect(g); g.connect(ctx.destination); n.start(t); n.stop(t+.45);
+}
+
+/* ---------- streaming ---------- */
+function teardown(){
+  clearTimeout(connectTimer);
+  if(srcNode){ try{srcNode.disconnect();}catch(e){} srcNode=null; }
+  if(audioEl){ audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); audioEl=null; }
+  routed=false;
+  if(ctx){ master.gain.cancelScheduledValues(ctx.currentTime); master.gain.setValueAtTime(0,ctx.currentTime); }
+}
+function connect(st){
+  const my=++token; teardown(); initAudio(); ctx.resume();
+  connecting=true; playing=false; setMsg(`Connecting to ${st.name}…`); renderPlayer(); renderList();
+  attempt(st,true,my);
+}
+function attempt(st,withCors,my){
+  const a=new Audio(); a.preload='none';
+  if(withCors) a.crossOrigin='anonymous';
+  audioEl=a;
+  let done=false;
+  const fail=()=>{
+    if(done||my!==token) return; done=true; clearTimeout(connectTimer);
+    if(srcNode){ try{srcNode.disconnect();}catch(e){} srcNode=null; }
+    a.pause(); a.removeAttribute('src'); a.load();
+    if(withCors) return attempt(st,false,my);
+    connecting=false; playing=false;
+    setMsg(`Couldn't reach ${st.name}. The stream may be offline right now, so try another bar.`);
+    setPlayUI(); renderList();
+  };
+  a.addEventListener('error',fail);
+  a.addEventListener('playing',()=>{
+    if(my!==token) return; done=true; clearTimeout(connectTimer);
+    connecting=false; playing=true; routed=withCors;
+    if(routed){ master.gain.setTargetAtTime(volume(),ctx.currentTime,.2); } else { a.volume=volume(); }
+    applyRoom(); setMsg(`Streaming from ${st.venue}.`); setPlayUI(); renderList();
+  });
+  a.addEventListener('waiting',()=>{ if(my===token&&playing) setMsg('Buffering…'); });
+  a.addEventListener('stalled',()=>{ if(my===token&&playing) setMsg('The connection is slow. Hang on…'); });
+  if(withCors){ try{ srcNode=ctx.createMediaElementSource(a); srcNode.connect(bus); }catch(e){ srcNode=null; } }
+  a.src=streamUrl(st);
+  connectTimer=setTimeout(fail,15000);
+  a.play().catch(err=>{ if(err && err.name==='AbortError') return; fail(); });
+}
+function stop(){ token++; teardown(); playing=false; connecting=false; setMsg('Stopped. Press play to rejoin the room.'); setPlayUI(); renderList(); }
+function tune(st){
+  if(current===st && (playing||connecting)) return;
+  const was=playing||connecting; current=st;
+  if(was){ tuneStatic(); connect(st); } else { setMsg('Press play to listen in.'); }
+  renderPlayer(); renderList(); renderShift();
+}
+$('playBtn').addEventListener('click',()=> (playing||connecting) ? stop() : connect(current));
+$('vol').addEventListener('input',()=>{ if(routed&&ctx) master.gain.setTargetAtTime(volume(),ctx.currentTime,.05); else if(audioEl) audioEl.volume=volume(); });
+$('roomDial').addEventListener('input',applyRoom);
+
+/* ---------- player UI ---------- */
+function setMsg(t){ $('pMsg').textContent=t; }
+function renderPlayer(){
+  if(!current) return;
+  const s=status(current);
+  $('pName').textContent=current.name;
+  $('pMeta').textContent=`${current.city}, ${current.type.toLowerCase()}`;
+  $('pRoom').textContent=`Broadcasting from ${current.venue}.`;
+  $('pWhen').textContent = s.night ? `Night in ${current.city}, likely live` : `Daytime in ${current.city}, may be a rerun`;
+  $('pLed').className='led'+(playing?' live':connecting?' open':'');
+  $('pStatus').textContent= playing ? 'Streaming now' : connecting ? 'Connecting' : 'Not connected';
+  $('pLocal').textContent=`${fmt(s.h,s.m)} in ${current.city}`;
+  $('pSite').href=current.site;
+  const h=health(current);
+  $('pAir').textContent = h&&h.ok&&h.nowPlaying ? `On air: ${h.nowPlaying}` : '';
+  if(!playing&&!connecting&&isDown(current)) setMsg(`${current.name} was offline at the last check. You can still try, or pick another bar.`);
+  const noDsp = playing && !routed;
+  $('dialNote').hidden=!noDsp; $('dialWrap').classList.toggle('off',noDsp); $('roomDial').disabled=noDsp;
+}
+function setPlayUI(){
+  const on=playing||connecting;
+  $('playLabel').textContent= on?'Stop':'Play';
+  $('playIcon').innerHTML= on?'<rect x="2" y="2" width="10" height="10" fill="currentColor"/>':'<path d="M2 1 L13 7 L2 13 Z" fill="currentColor"/>';
+  renderPlayer();
+}
+
+/* ---------- list ---------- */
+function sorted(){ return [...STATIONS].map(s=>({s,st:status(s),down:isDown(s)})).sort((a,b)=>(a.down-b.down)||(b.st.night-a.st.night)||a.s.city.localeCompare(b.s.city)); }
+function renderList(){
+  const ul=$('list'); ul.innerHTML='';
+  const n=STATIONS.filter(x=>status(x).night);
+  const known=Object.keys(STATUS).length>0, up=STATIONS.filter(x=>!isDown(x)).length;
+  $('openCount').textContent= known
+    ? `${up} of ${STATIONS.length} bars are streaming right now. It's night for ${n.filter(x=>!isDown(x)).length} of them.`
+    : `${STATIONS.length} bars on the dial. It's night for ${n.length} of them right now.`;
+  $('checked').textContent= CHECKED_AT ? `Streams last checked ${agoText(CHECKED_AT)}.` : '';
+  sorted().filter(x=>filter==='all'||(x.st.night&&!x.down)).forEach(({s,st,down})=>{
+    const li=document.createElement('li'), b=document.createElement('button'); b.className='st'; b.type='button';
+    if(current===s) b.setAttribute('aria-current','true');
+    if(down) b.classList.add('down');
+    const led = current===s&&playing ? 'live' : (st.night&&!down) ? 'open' : '';
+    b.innerHTML=`<span class="led ${led}"></span><span><span class="nm"></span><br><span class="sub"></span></span><span class="tm"></span>`;
+    b.querySelector('.nm').textContent=s.name;
+    b.querySelector('.sub').textContent=`${s.city}, ${s.type.toLowerCase()}`;
+    b.querySelector('.tm').innerHTML=`${fmt(st.h,st.m)}<br><span class="sub">${down?'offline':st.night?'night':'day'}</span>`;
+    if(down) b.setAttribute('aria-label',`${s.name}, ${s.city}, offline right now`);
+    b.addEventListener('click',()=>tune(s));
+    li.appendChild(b); ul.appendChild(li);
+  });
+  if(!ul.children.length){ const li=document.createElement('li'); li.style.padding='12px'; li.textContent='No bars on the dial are in their evening right now. Switch to All bars.'; ul.appendChild(li); }
+}
+document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{ filter=b.dataset.filter; document.querySelectorAll('[data-filter]').forEach(x=>x.setAttribute('aria-pressed',x===b)); renderList(); }));
+
+/* ---------- night shift ---------- */
+function renderShift(){
+  const el=$('shift'); el.innerHTML='';
+  [...STATIONS].sort((a,b)=>utcOffsetMin(b.tz)-utcOffsetMin(a.tz)).forEach(s=>{
+    const lab=document.createElement('div'); lab.className='lab'; lab.textContent=`${s.name}, ${s.city}`;
+    const tr=document.createElement('div'); tr.className='track';
+    const start=((CONFIG.nightStart*60-utcOffsetMin(s.tz))%1440+1440)%1440;
+    const len=((CONFIG.nightEnd-CONFIG.nightStart+24)%24||24)*60;
+    const seg=(a,l)=>{ const d=document.createElement('div'); d.className='span'+(current===s?' cur':''); d.style.left=(a/1440*100)+'%'; d.style.width=(l/1440*100)+'%'; tr.appendChild(d); };
+    if(start+len<=1440) seg(start,len); else { seg(start,1440-start); seg(0,start+len-1440); }
+    el.append(lab,tr);
+  });
+  const ax=document.createElement('div'); ax.className='axis';
+  [0,3,6,9,12,15,18,21,24].forEach(h=>{ const sp=document.createElement('span'); sp.style.left=(h/24*100)+'%'; sp.textContent=String(h%24).padStart(2,'0'); ax.appendChild(sp); });
+  el.append(document.createElement('div'),ax);
+  const d=new Date(), frac=(d.getUTCHours()*60+d.getUTCMinutes())/1440, first=el.querySelector('.track');
+  let line=document.querySelector('.nowline'); if(!line){ line=document.createElement('div'); line.className='nowline'; el.parentElement.appendChild(line); }
+  requestAnimationFrame(()=>{ const w=el.parentElement.getBoundingClientRect(), r=first.getBoundingClientRect(); line.style.left=(r.left-w.left+r.width*frac)+'px'; line.style.top='-4px'; line.style.height=(el.getBoundingClientRect().height-12)+'px'; });
+}
+
+/* ---------- VU meters ---------- */
+const meters=[{c:$('vuL'),lv:0,lab:'L'},{c:$('vuR'),lv:0,lab:'R'}], buf=new Float32Array(1024);
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function drawMeter(m,an){
+  const c=m.c, dpr=window.devicePixelRatio||1, w=c.clientWidth, h=c.clientHeight; if(!w) return;
+  if(c.width!==w*dpr){ c.width=w*dpr; c.height=h*dpr; }
+  const g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+  let target=0;
+  if(an&&playing&&routed){ an.getFloatTimeDomainData(buf); let s=0; for(let i=0;i<buf.length;i++) s+=buf[i]*buf[i]; const db=20*Math.log10(Math.sqrt(s/buf.length)+1e-6); target=Math.min(1,Math.max(0,(db+32)/32)); }
+  m.lv+=(target-m.lv)*(target>m.lv?.22:.07);
+  const ink=css('--ink'), lit=playing&&routed;
+  g.fillStyle=lit?css('--face'):css('--face-dim'); g.fillRect(0,0,w,h);
+  const cx=w/2, cy=h*1.02, R=h*.8, a0=-Math.PI*.78, a1=-Math.PI*.22;
+  g.strokeStyle=ink; g.lineWidth=1.5; g.beginPath(); g.arc(cx,cy,R,a0,a1); g.stroke();
+  g.strokeStyle=css('--led'); g.lineWidth=4; g.beginPath(); g.arc(cx,cy,R-3,a0+(a1-a0)*.75,a1); g.stroke();
+  g.fillStyle=ink; g.font=`${Math.max(9,h*.1)}px ${css('--pixel')}`; g.textAlign='center';
+  const L=['-20','-10','-5','-3','0','+3'];
+  L.forEach((t,i)=>{ const a=a0+(a1-a0)*(i/(L.length-1)); g.strokeStyle=ink; g.lineWidth=1.5; g.beginPath(); g.moveTo(cx+Math.cos(a)*R,cy+Math.sin(a)*R); g.lineTo(cx+Math.cos(a)*(R+6),cy+Math.sin(a)*(R+6)); g.stroke(); g.fillText(t,cx+Math.cos(a)*(R+15),cy+Math.sin(a)*(R+15)+3); });
+  g.font=`${Math.max(11,h*.14)}px ${css('--pixel')}`; g.fillText('VU '+m.lab,cx,h*.72);
+  const a=a0+(a1-a0)*m.lv; g.strokeStyle=ink; g.lineWidth=2; g.beginPath(); g.moveTo(cx,cy); g.lineTo(cx+Math.cos(a)*(R+2),cy+Math.sin(a)*(R+2)); g.stroke();
+}
+function loop(){ drawMeter(meters[0],anL); drawMeter(meters[1],anR); requestAnimationFrame(loop); }
+
+/* ---------- windows ---------- */
+let z=10; const isDesktop=()=>window.innerWidth>760;
+function front(w){ document.querySelectorAll('.win').forEach(x=>x.classList.remove('front')); w.classList.add('front'); w.style.zIndex=++z; }
+document.querySelectorAll('.win').forEach(w=>{
+  const bar=w.querySelector('.titlebar');
+  w.addEventListener('pointerdown',()=>front(w));
+  bar.addEventListener('pointerdown',e=>{
+    if(e.target.closest('button')||!isDesktop()) return;
+    const surf=$('surface').getBoundingClientRect(), r=w.getBoundingClientRect(), dx=e.clientX-r.left, dy=e.clientY-r.top;
+    bar.setPointerCapture(e.pointerId);
+    const move=ev=>{ let x=ev.clientX-surf.left-dx, y=ev.clientY-surf.top-dy; x=Math.max(-r.width+60,Math.min(x,surf.width-60)); y=Math.max(0,y); w.style.left=x+'px'; w.style.top=y+'px'; };
+    const up=()=>{ bar.removeEventListener('pointermove',move); bar.removeEventListener('pointerup',up); if(w.id==='w-shift') renderShift(); };
+    bar.addEventListener('pointermove',move); bar.addEventListener('pointerup',up);
+  });
+  w.querySelector('.closebox').addEventListener('click',()=>{ w.hidden=true; syncMenu(); });
+});
+function syncMenu(){ document.querySelectorAll('[data-toggle]').forEach(b=>b.setAttribute('aria-pressed',!$(b.dataset.toggle).hidden)); }
+document.querySelectorAll('[data-toggle]').forEach(b=>b.addEventListener('click',()=>{ const w=$(b.dataset.toggle); w.hidden=!w.hidden; if(!w.hidden){ front(w); if(!isDesktop()) w.scrollIntoView({behavior:'smooth'}); if(w.id==='w-shift') renderShift(); } syncMenu(); }));
+document.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',()=>{
+  const w=$(b.dataset.open); w.hidden=false; front(w); syncMenu(); if(w.id==='w-shift') renderShift(); if(!isDesktop()) w.scrollIntoView({behavior:'smooth'});
+  if(w.id==='w-player'){ const rb=$('roombox'); rb.classList.remove('flash'); void rb.offsetWidth; rb.classList.add('flash'); $('roomDial').focus({preventScroll:!isDesktop()}); }
+}));
+function layout(){
+  const surf=$('surface'); if(!isDesktop()){ surf.style.minHeight=''; return; }
+  const W=surf.clientWidth, gap=24; let x=gap,y=gap,rowH=0,bottom=0;
+  ['w-welcome','w-player','w-stations','w-shift'].forEach(id=>{
+    const w=$(id); if(!w.dataset.w) w.dataset.w=parseInt(w.style.width); const ww=Math.min(+w.dataset.w,W-gap*2); w.style.width=ww+'px';
+    const hid=w.hidden; w.hidden=false; const h=w.offsetHeight; w.hidden=hid;
+    if(x+ww>W-gap&&x>gap){ x=gap; y+=rowH+gap; rowH=0; }
+    w.style.left=x+'px'; w.style.top=y+'px'; x+=ww+gap; rowH=Math.max(rowH,h); bottom=Math.max(bottom,y+h);
+  });
+  surf.style.minHeight=(bottom+gap*2)+'px'; renderShift();
+}
+window.addEventListener('resize',()=>{ clearTimeout(window._rt); window._rt=setTimeout(layout,120); });
+
+/* ---------- clock, theme ---------- */
+function tick(){ const d=new Date(); $('clock').innerHTML=`UTC <b>${fmt(d.getUTCHours(),d.getUTCMinutes())}</b>&nbsp;&nbsp;You <b>${fmt(d.getHours(),d.getMinutes())}</b>`; }
+setInterval(()=>{ tick(); renderPlayer(); renderList(); },30000);
+$('themeBtn').addEventListener('click',()=>{ const r=document.documentElement, dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme=dark?'light':'dark'; try{localStorage.setItem('nc-theme',r.dataset.theme);}catch(e){} });
+try{ const t=localStorage.getItem('nc-theme'); if(t) document.documentElement.dataset.theme=t; }catch(e){}
+
+/* ---------- tip the bar (demo) ---------- */
+let tipAmt=5, tipTotal=0, tipReturn=null;
+const money=n=>'$'+(Math.round(n*100)/100).toFixed(n%1?2:0);
+function tipRender(){
+  $('tipTo').textContent=current.name;
+  $('tipSub').textContent=`${current.city}. It's ${fmt(status(current).h,status(current).m)} there now.`;
+  const bar=tipAmt*.9;
+  $('tipSplit').textContent = tipAmt>0
+    ? `${money(bar)} goes to ${current.name}, to share with tonight's DJ. Nightcap keeps ${money(tipAmt-bar)} to cover payment fees.`
+    : 'Choose an amount to see where it goes.';
+  $('tipSend').textContent = tipAmt>0 ? `Send ${money(tipAmt)}` : 'Choose an amount';
+  $('tipSend').disabled = !(tipAmt>0);
+}
+function tipOpen(){
+  if(!current) return;
+  tipReturn=document.activeElement;
+  $('tipForm').hidden=false; $('tipThanks').hidden=true; $('tipNote').value=''; $('tipCustom').value='';
+  tipAmt=5; document.querySelectorAll('[data-amt]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.amt==='5'));
+  tipRender(); document.querySelectorAll('.win').forEach(x=>x.classList.remove('front')); document.querySelector('.tipwin').classList.add('front'); $('tipScrim').hidden=false; $('tipSend').focus();
+}
+function tipClose(){ $('tipScrim').hidden=true; if(tipReturn) tipReturn.focus(); }
+$('tipOpen').addEventListener('click',tipOpen);
+$('tipClose').addEventListener('click',tipClose);
+$('tipDone').addEventListener('click',tipClose);
+$('tipScrim').addEventListener('click',e=>{ if(e.target===$('tipScrim')) tipClose(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !$('tipScrim').hidden) tipClose(); });
+document.querySelectorAll('[data-amt]').forEach(b=>b.addEventListener('click',()=>{
+  tipAmt=+b.dataset.amt; $('tipCustom').value='';
+  document.querySelectorAll('[data-amt]').forEach(x=>x.setAttribute('aria-pressed',x===b)); tipRender();
+}));
+$('tipCustom').addEventListener('input',()=>{
+  const v=parseFloat($('tipCustom').value.replace(/[^0-9.]/g,''));
+  document.querySelectorAll('[data-amt]').forEach(x=>x.setAttribute('aria-pressed','false'));
+  tipAmt = isFinite(v) && v>0 ? Math.min(v,500) : 0; tipRender();
+});
+$('tipSend').addEventListener('click',()=>{
+  if(!(tipAmt>0)) return;
+  tipTotal+=tipAmt;
+  const note=$('tipNote').value.trim();
+  $('tipStamp').textContent=`${money(tipAmt)} sent`;
+  $('tipThanksMsg').textContent = `${current.name} says thanks.` + (note ? ` Your note will show on the bar's screen: "${note}"` : ` Your round is on its way to ${current.city}.`);
+  $('tipForm').hidden=true; $('tipThanks').hidden=false; $('tipDone').focus();
+  $('tipOpenLabel').textContent=`Tip again (${money(tipTotal)} sent)`;
+});
+
+/* ---------- boot ---------- */
+function applyConfig(){
+  document.title = `${CONFIG.siteName} — live from the world's listening bars`;
+  const n=document.getElementById('siteName'); if(n) n.textContent=CONFIG.siteName;
+  const bt=document.getElementById('bootTitle'); if(bt) bt.textContent=CONFIG.siteName;
+  const bs=document.querySelector('.bootcard .sub'); if(bs) bs.textContent=CONFIG.tagline;
+  $('roomDial').value=CONFIG.defaultRoomDial;
+}
+async function boot(){
+  applyConfig();
+  await loadStations(); await loadStatus();
+  current=sorted()[0].s;
+  tick(); renderPlayer(); renderList(); layout(); front($('w-player')); loop();
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches, msgs=['Warming up the valves…','Cleaning the stylus…','Checking who\'s on the dial…'];
+  requestAnimationFrame(()=>{ $('bootBar').style.width='100%'; });
+  let i=0; const iv=setInterval(()=>{ i++; if(i<msgs.length) $('bootMsg').textContent=msgs[i]; },430);
+  setTimeout(()=>{ clearInterval(iv); $('bootMsg').textContent=`First up: ${current.name}, ${current.city}`; $('enterBtn').disabled=false; $('enterBtn').focus(); }, reduce?50:1350);
+}
+$('enterBtn').addEventListener('click',()=>{ $('boot').hidden=true; connect(current); });
+$('quietBtn').addEventListener('click',()=>{ $('boot').hidden=true; });
+boot();
+setInterval(async()=>{ await loadStatus(); renderPlayer(); renderList(); }, CONFIG.statusRefreshMinutes*60000);
